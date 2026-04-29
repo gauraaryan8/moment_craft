@@ -42,9 +42,60 @@
     updateDoc, increment, query, where, orderBy, serverTimestamp
   };
 
+  // ══════════════════════════════════════
+  // LIVE VISITOR TRACKING
+  // ══════════════════════════════════════
+  async function trackVisitor(page) {
+    try {
+      // Get location info from free IP API
+      const res = await fetch('https://ipapi.co/json/');
+      const loc = await res.json();
+
+      const visitorId = localStorage.getItem('mc_vid') || Math.random().toString(36).slice(2,12);
+      localStorage.setItem('mc_vid', visitorId);
+
+      const visitorData = {
+        visitorId,
+        page: page || 'home',
+        city: loc.city || 'Unknown',
+        country: loc.country_name || 'Unknown',
+        ip: loc.ip || 'Unknown',
+        device: /Mobile|Android|iPhone/.test(navigator.userAgent) ? '📱 Mobile' : '💻 Desktop',
+        browser: navigator.userAgent.includes('Chrome') ? 'Chrome' : navigator.userAgent.includes('Firefox') ? 'Firefox' : navigator.userAgent.includes('Safari') ? 'Safari' : 'Other',
+        lastSeen: serverTimestamp(),
+        isOnline: true,
+      };
+
+      const docRef = doc(collection(db, 'visitors'), visitorId);
+      await setDoc(docRef, visitorData, { merge: true });
+
+      // Mark offline when user leaves
+      window.addEventListener('beforeunload', async () => {
+        await setDoc(docRef, { isOnline: false, lastSeen: serverTimestamp() }, { merge: true });
+      });
+    } catch(e) {
+      console.log('Tracking error:', e);
+    }
+  }
+
+  // Track on load
+  setTimeout(() => trackVisitor(window.location.search || 'home'), 2000);
+
   // Auth state listener
   onAuthStateChanged(auth, (user) => {
-    window.state.user = user ? { uid: user.uid, name: user.displayName || user.email.split('@')[0], email: user.email } : null;
+    const ADMIN_EMAIL = 'gauraaryan8@gmail.com';
+    if (user) {
+      const isAdmin = user.email === ADMIN_EMAIL;
+      window.state.user = {
+        uid: user.uid,
+        name: user.displayName || user.email.split('@')[0],
+        email: user.email,
+        plan: isAdmin ? 'Flame' : 'Free',
+        isAdmin: isAdmin,
+      };
+    } else {
+      window.state.user = null;
+    }
     updateNav();
     if (window.state.currentPage === 'dashboard') renderDashboard();
     if (window.state.currentPage === 'admin') renderAdmin();
@@ -581,6 +632,7 @@ footer strong{color:var(--violet2);}
       <div class="admin-tab active" data-tab="templates" onclick="switchAdminTab('templates')">Templates</div>
       <div class="admin-tab" data-tab="users" onclick="switchAdminTab('users')">All Pages</div>
       <div class="admin-tab" data-tab="analytics" onclick="switchAdminTab('analytics')">Analytics</div>
+      <div class="admin-tab" data-tab="live" onclick="switchAdminTab('live')">🔴 Live Visitors</div>
     </div>
     <div id="adminContent"></div>
   </div>
@@ -1032,6 +1084,17 @@ function switchAdminTab(tab, pages) {
           }).join('')}</tbody>
         </table>
       </div>`;
+  } else if (tab === 'live') {
+    content.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+        <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:20px;">🔴 Live Visitors</div>
+        <button class="btn-primary" style="padding:10px 20px;font-size:13px;" onclick="loadLiveVisitors()">🔄 Refresh</button>
+      </div>
+      <div id="liveVisitorsWrap">
+        <div style="text-align:center;padding:40px;"><div class="loading"></div><p style="color:var(--text2);margin-top:12px;">Loading visitors...</p></div>
+      </div>
+    `;
+    loadLiveVisitors();
   } else if (tab === 'analytics') {
     if (!pages) { renderAdmin(); return; }
     const byTemplate = {};
@@ -1130,6 +1193,62 @@ async function logout() {
 }
 
 // ══════════════════════════════════════
+// LIVE VISITOR TRACKING DISPLAY
+// ══════════════════════════════════════
+async function loadLiveVisitors() {
+  const wrap = document.getElementById('liveVisitorsWrap');
+  if (!wrap) return;
+
+  try {
+    const fb = window._fb;
+    const snap = await fb.getDocs(fb.collection(fb.db, 'visitors'));
+    const visitors = snap.docs.map(d => d.data());
+
+    // Sort: online first, then by last seen
+    visitors.sort((a,b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
+
+    const onlineCount = visitors.filter(v => v.isOnline).length;
+    const totalCount = visitors.length;
+
+    if (visitors.length === 0) {
+      wrap.innerHTML = `<div class="empty-state"><span class="empty-icon">👥</span><div class="empty-title">No visitors yet</div><div class="empty-sub">Visitors will appear here when they open your site</div></div>`;
+      return;
+    }
+
+    wrap.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px;">
+        <div class="dash-stat"><div class="dash-stat-icon">🟢</div><div class="dash-stat-num" style="color:var(--green)">${onlineCount}</div><div class="dash-stat-lbl">Online Now</div></div>
+        <div class="dash-stat"><div class="dash-stat-icon">👥</div><div class="dash-stat-num gradient-text">${totalCount}</div><div class="dash-stat-lbl">Total Visitors</div></div>
+        <div class="dash-stat"><div class="dash-stat-icon">📱</div><div class="dash-stat-num" style="color:var(--cyan)">${visitors.filter(v=>v.device&&v.device.includes('Mobile')).length}</div><div class="dash-stat-lbl">Mobile Users</div></div>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;">
+        <table class="admin-table">
+          <thead><tr><th>Status</th><th>Location</th><th>Device</th><th>Browser</th><th>Page</th><th>Visitor ID</th></tr></thead>
+          <tbody>
+            ${visitors.map(v => `
+              <tr>
+                <td><span class="badge ${v.isOnline ? 'active' : 'inactive'}">${v.isOnline ? '🟢 Online' : '⚫ Offline'}</span></td>
+                <td>📍 ${v.city || 'Unknown'}, ${v.country || 'Unknown'}</td>
+                <td>${v.device || '💻 Desktop'}</td>
+                <td>${v.browser || 'Unknown'}</td>
+                <td style="font-family:monospace;font-size:12px;color:var(--violet2)">${v.page || 'home'}</td>
+                <td style="font-family:monospace;font-size:11px;color:var(--text3)">${(v.visitorId||'').slice(0,8)}...</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      <p style="font-size:12px;color:var(--text3);margin-top:12px;text-align:center;">Auto-refreshes every 30 seconds • Last updated: ${new Date().toLocaleTimeString()}</p>
+    `;
+
+    // Auto refresh every 30 seconds
+    setTimeout(loadLiveVisitors, 30000);
+  } catch(err) {
+    wrap.innerHTML = `<div style="padding:20px;color:var(--rose);">⚠️ Error loading visitors: ${err.message}</div>`;
+  }
+}
+
+// ══════════════════════════════════════
 // DELETE
 // ══════════════════════════════════════
 function deletePage(slug) {
@@ -1160,6 +1279,7 @@ function updateNav() {
   const navUser = document.getElementById('navUser');
   if (u) {
     navUser.innerHTML = `
+      ${u.isAdmin ? '<span class="tag" style="font-size:11px;">👑 Admin</span>' : ''}
       <span style="font-size:13px;color:var(--text2);">${u.name}</span>
       <div class="avatar" onclick="navigate('dashboard')">${u.name.charAt(0).toUpperCase()}</div>
       <button class="nav-link" onclick="logout()">Sign Out</button>
